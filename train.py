@@ -51,7 +51,7 @@ def train(args,model):
     scaler = GradScaler() if args.fp16 else None
 
     if args.local_rank != -1:
-    model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=False)
+        model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=False)
 
 best_acc = 0.0
 global_step = -1
