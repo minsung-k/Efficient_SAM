@@ -18,7 +18,11 @@ from utils.dist_util import get_world_size
 import torch.nn.functional as F
 import logging
 from datetime import timedelta
-from apex import amp
+
+import torch
+from torch.cuda.amp import autocast, GradScaler
+from torch.nn.parallel import DistributedDataParallel as DDP
+
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 logger = logging.getLogger(__name__)
@@ -44,7 +48,53 @@ def train(args,model):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer0, T_max=args.epochs)
 
     #half float setting 
-    if args.fp16:
+    scaler = GradScaler() if args.fp16 else None
+
+    if args.local_rank != -1:
+    model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=False)
+
+best_acc = 0.0
+global_step = -1
+sampler = dataset.train.sampler
+
+for epoch in range(args.epochs):
+    if args.local_rank != -1:
+        sampler.set_epoch(epoch)
+    model.train()
+    log.train(len_dataset=len(dataset.train))
+
+    for batch in dataset.train:
+        global_step += 1
+        inputs, targets = (b.to(args.device) for b in batch)
+
+        # Forward pass with automatic mixed precision
+        with autocast(enabled=args.fp16):
+            predictions = model(inputs)
+            loss = loss_fct(predictions, targets)
+
+        def defined_backward(loss):
+            if args.fp16:
+                # Scale the loss and perform backward pass
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
+
+        # Apply the backward pass and optimizer step
+        paras = [inputs, targets, loss_fct, model, defined_backward]
+        optimizer.paras = paras
+
+        if args.fp16:
+            # Step the scaler instead of the optimizer
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+
+        predictions, loss = optimizer.returnthings
+
+        
+
+    
         model, [optimizer0,optimizer] = amp.initialize(models=model,
                                       optimizers=[optimizer0,optimizer],
                                       opt_level=args.fp16_opt_level)
@@ -54,36 +104,6 @@ def train(args,model):
     # Distributed training
     if args.local_rank != -1:
         model = DDP(model,device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=False)
-
-
-
-    best_acc = 0.0
-    global_step = -1
-    sampler = dataset.train.sampler
-    for epoch in range(args.epochs):
-        if args.local_rank != -1:
-            sampler.set_epoch(epoch)
-        model.train()
-        log.train(len_dataset=len(dataset.train))
-
-        for batch in dataset.train:
-            global_step += 1
-            # inputs, targets = (b.to(args.device) for b in batch)
-            inputs, targets = (b.to(args.device) for b in batch)
-
-            def defined_backward(loss):
-                if args.fp16:
-                    with amp.scale_loss(loss, optimizer0) as scaled_loss:
-                    # with amp.scale_loss(loss, [optimizer0,optimizer]) as scaled_loss:
-                        scaled_loss.backward()
-                else:
-                    loss.backward()
-
-            paras = [inputs,targets,loss_fct,model,defined_backward]
-            optimizer.paras = paras
-            optimizer.step()
-            predictions,loss = optimizer.returnthings
-
 
  
 
